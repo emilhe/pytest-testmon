@@ -16,6 +16,7 @@ from _pytest.config import ExitCode, Config
 from _pytest.terminal import TerminalReporter
 
 from testmon.configure import TmConf
+from testmon.import_graph import ImportRecorder
 
 from testmon.testmon_core import (
     TestmonCollector,
@@ -124,6 +125,17 @@ def pytest_addoption(parser):
     )
     parser.addini("tmnet_url", "URL of the testmon.net api server.")
     parser.addini("tmnet_api_key", "testmon api key")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_load_initial_conftests(early_config, parser, args):  # pylint: disable=unused-argument
+    """Record imports from the first conftest on (see testmon.import_graph)."""
+    options = vars(early_config.known_args_namespace)
+    if not configure._get_notestmon_reasons(  # pylint: disable=protected-access
+        options
+    ) and not options.get("testmon_nocollect"):
+        early_config.testmon_imports = ImportRecorder(str(early_config.rootpath))
+        early_config.testmon_imports.install()
 
 
 def testmon_options(config):
@@ -237,6 +249,7 @@ def register_plugins(config, should_select, should_collect, cov_plugin):
                     config.rootdir.strpath,
                     testmon_labels=testmon_options(config),
                     cov_plugin=cov_plugin,
+                    imports=getattr(config, "testmon_imports", None),
                 ),
                 config.testmon_data,
                 running_as=get_running_as(config),
@@ -265,6 +278,9 @@ def pytest_configure(config):
         config, coverage_stack, cov_plugin=cov_plugin
     )
     config.testmon_config: TmConf = tm_conf
+    if not tm_conf.collect and getattr(config, "testmon_imports", None):
+        config.testmon_imports.uninstall()
+        config.testmon_imports = None
     if tm_conf.select or tm_conf.collect:
         try:
             init_testmon_data(config)
@@ -390,15 +406,35 @@ class TestmonCollect:
         self, item, nextitem
     ):  # pylint: disable=unused-argument
         self.testmon.start_testmon(item.nodeid, nextitem.nodeid if nextitem else None)
+        imports = self.testmon.imports
+        if imports:
+            imports.start_test(item)
+            imports.owners.append(item.nodeid)
         result = yield
+        if imports:
+            imports.owners.remove(item.nodeid)
         if result.excinfo and issubclass(result.excinfo[0], BaseException):
             self.testmon.discard_current()
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_fixture_setup(self, fixturedef, request):  # pylint: disable=unused-argument
+        if not self.testmon.imports:
+            yield
+            return
+        with self.testmon.imports.owning(self.testmon.imports.fixture_key(fixturedef)):
+            yield
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_makereport(self, item, call):  # pylint: disable=unused-argument
         result = yield
 
         if call.when == "teardown":
+            if self.testmon.imports:
+                # Fixtures requested with request.getfixturevalue too.
+                request = getattr(item, "_request", None)
+                self.testmon.imports.add_fixtures(
+                    item.nodeid, getattr(request, "_fixture_defs", {}).values()
+                )
             report = result.get_result()
             report.nodes_files_lines = self.testmon.get_batch_coverage_data()
             result.force_result(

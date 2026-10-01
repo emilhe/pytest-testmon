@@ -13,6 +13,10 @@ from coverage.phystokens import source_encoding
 
 CHECKUMS_ARRAY_TYPE = "i"
 
+# A pseudo line number: the module was imported, so its code outside function
+# bodies ran. Coverage never reports line 0.
+MODULE_LEVEL = 0
+
 
 def to_signed(unsigned33):
     unsigned33 = unsigned33 & 0xFFFFFFFF
@@ -302,5 +306,13 @@ def create_fingerprint(module, covered_lines) -> [int]:
                 method_reprs.append(current_block.code)
         except IndexError:
             break
+
+    if MODULE_LEVEL in covered_lines:
+        # The module block is the last; a file without one (empty, or a
+        # syntax error) gets a checksum no source matches, so any change to it
+        # is a change to its module-level code.
+        module_level = blocks[-1].code if blocks else "<no module block>"
+        if module_level not in method_reprs:
+            method_reprs.append(module_level)
 
     return methods_to_checksums(method_reprs)

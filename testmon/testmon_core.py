@@ -29,6 +29,7 @@ from testmon.common import (
 )
 
 from testmon.process_code import (
+    MODULE_LEVEL,
     match_fingerprint,
     create_fingerprint,
     methods_to_checksums,
@@ -441,7 +442,7 @@ class TestmonCollector:
     coverage_stack: [Coverage] = []
 
     def __init__(
-        self, rootdir, testmon_labels=None, cov_plugin=None
+        self, rootdir, testmon_labels=None, cov_plugin=None, imports=None
     ):  # TODO remove cov_plugin
         try:
             from testmon.testmon_core import (  # pylint: disable=import-outside-toplevel
@@ -458,6 +459,7 @@ class TestmonCollector:
         self.cov: Coverage = None
         self.sub_cov_file = None
         self.cov_plugin: CovPlugin = cov_plugin
+        self.imports = imports
         self._test_name = None
         self._next_test_name = None
         self.batched_test_names = set()
@@ -602,9 +604,19 @@ class TestmonCollector:
         for test_name in self.batched_test_names:
             if home_file(test_name) not in nodes_files_lines.setdefault(test_name, {}):
                 nodes_files_lines[test_name].setdefault(home_file(test_name), {1})
+        if self.imports:
+            for test_name, files in self.imports.reached(
+                self.batched_test_names
+            ).items():
+                for file in files:
+                    nodes_files_lines[test_name].setdefault(file, set()).add(
+                        MODULE_LEVEL
+                    )
         return nodes_files_lines, files_lines
 
     def close(self):
+        if self.imports:
+            self.imports.uninstall()
         if self.cov is None:
             return
         assert self.cov in TestmonCollector.coverage_stack
